@@ -1,0 +1,105 @@
+export const assetClasses = [
+  {
+    id: 'buildings',
+    label: 'Properties & Buildings',
+    color: '#f97316',
+    priority: 'Must have',
+    description: 'Residential, commercial, and mixed-use structures with footprint estimation',
+    icon: 'buildings',
+  },
+  {
+    id: 'trees',
+    label: 'Trees & Green Cover',
+    color: '#22c55e',
+    priority: 'Must have',
+    description: 'Individual trees, clusters, and canopy area mapping',
+    icon: 'trees',
+  },
+  {
+    id: 'parks',
+    label: 'Parks & Open Spaces',
+    color: '#10b981',
+    priority: 'Must have',
+    description: 'Playgrounds, gardens, open plots, and urban green buffers',
+    icon: 'parks',
+  },
+  {
+    id: 'water',
+    label: 'Water Bodies',
+    color: '#3b82f6',
+    priority: 'Must have',
+    description: 'Lakes, ponds, canals, streams, and retention zones',
+    icon: 'water',
+  },
+  {
+    id: 'roads',
+    label: 'Roads & Footpaths',
+    color: '#94a3b8',
+    priority: 'Must have',
+    description: 'Road corridors and pedestrian pathways with width insights',
+    icon: 'roads',
+  },
+  {
+    id: 'drains',
+    label: 'Drains & Sewage',
+    color: '#8b5cf6',
+    priority: 'Must have',
+    description: 'Open drains, storm-water channels, and sewage paths',
+    icon: 'drains',
+  },
+  {
+    id: 'vehicles',
+    label: 'Vehicles & Parking',
+    color: '#f59e0b',
+    priority: 'Good to have',
+    description: 'Parked vehicles and parking occupancy clusters',
+    icon: 'vehicles',
+  },
+  {
+    id: 'waste',
+    label: 'Waste Dumps',
+    color: '#a16207',
+    priority: 'Good to have',
+    description: 'Waste accumulation spots and dumping signatures',
+    icon: 'waste',
+  },
+  {
+    id: 'solar',
+    label: 'Solar Panels',
+    color: '#eab308',
+    priority: 'Optional',
+    description: 'Rooftop and ground-mounted solar arrays',
+    icon: 'solar',
+  },
+] as const
+
+export const loadingMessages = [
+  'Loading vision model...',
+  'Extracting spatial features...',
+  'Detecting asset geometry...',
+  'Computing coverage metrics...',
+  'Generating governance insights...',
+  'Finalizing analysis...',
+  'Detection complete',
+] as const
+
+export const howItWorksSteps = [
+  {
+    step: 1,
+    title: 'Upload',
+    description: 'Upload satellite or drone imagery in standard image formats',
+    icon: 'upload',
+  },
+  {
+    step: 2,
+    title: 'Analyze',
+    description: 'AI Vision Engine detects and classifies the target spatial asset categories',
+    icon: 'cpu',
+  },
+  {
+    step: 3,
+    title: 'Export',
+    description: 'Export structured data to GeoJSON and CSV for GIS operations',
+    icon: 'download',
+  },
+] as const
