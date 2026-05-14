@@ -6,7 +6,8 @@ import type {
 } from '../types/analysis'
 
 const REQUEST_TIMEOUT_MS = 180_000
-export type AnalysisMode = 'block_analysis' | 'naming_analysis'
+const VIDEO_REQUEST_TIMEOUT_MS = 900_000
+export type AnalysisMode = 'block_analysis' | 'naming_analysis' | 'asset_map_analysis' | 'video_analysis'
 
 function getApiBaseUrl(): string {
   const configured = import.meta.env.VITE_ANALYSIS_API_BASE as string | undefined
@@ -84,6 +85,12 @@ function buildAnalysisForm(imageFile: File, analysisMode: AnalysisMode): FormDat
   return form
 }
 
+function buildVideoForm(videoFile: File): FormData {
+  const form = new FormData()
+  form.append('video', videoFile)
+  return form
+}
+
 export async function analyzeSpatialImage(
   imageFile: File,
   analysisMode: AnalysisMode = 'block_analysis',
@@ -104,7 +111,7 @@ export async function analyzeSpatialImage(
 
       if (!response.ok) {
         const parsed = await parseErrorResponse(response)
-        if (response.status === 404 || response.status === 502 || response.status === 503) {
+        if (response.status === 404 || response.status === 503) {
           attemptErrors.push(`${endpoint} -> HTTP ${response.status}`)
           continue
         }
@@ -132,6 +139,56 @@ export async function analyzeSpatialImage(
 
   return toErrorPayload(
     'Unable to reach analysis service.',
+    `Tried endpoints: ${attemptErrors.join(' | ')}. Ensure backend is running with "npm run dev:backend".`,
+    'network_error',
+  )
+}
+
+export async function analyzeSpatialVideo(videoFile: File): Promise<AnalysisApiResponse> {
+  const endpoints = resolveCandidateEndpoints('/api/analyze-video')
+  const attemptErrors: string[] = []
+
+  for (const endpoint of endpoints) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), VIDEO_REQUEST_TIMEOUT_MS)
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        body: buildVideoForm(videoFile),
+        signal: controller.signal,
+      })
+
+      if (!response.ok) {
+        const parsed = await parseErrorResponse(response)
+        if (response.status === 404 || response.status === 503) {
+          attemptErrors.push(`${endpoint} -> HTTP ${response.status}`)
+          continue
+        }
+        return parsed
+      }
+
+      const payload = await response.json()
+      if (!isAnalysisSuccess(payload)) {
+        attemptErrors.push(`${endpoint} -> Invalid payload shape`)
+        continue
+      }
+
+      return payload
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        attemptErrors.push(`${endpoint} -> Timeout after ${VIDEO_REQUEST_TIMEOUT_MS / 1000}s`)
+      } else {
+        const message = error instanceof Error ? error.message : 'Unknown network error'
+        attemptErrors.push(`${endpoint} -> ${message}`)
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  return toErrorPayload(
+    'Unable to reach video analysis service.',
     `Tried endpoints: ${attemptErrors.join(' | ')}. Ensure backend is running with "npm run dev:backend".`,
     'network_error',
   )
@@ -186,6 +243,9 @@ export async function exportCSV(result: AnalysisApiSuccess): Promise<Blob> {
     'condition',
     'center_x',
     'center_y',
+    'shadow_length_pixels',
+    'shadow_length_meters',
+    'estimated_height_meters',
   ].join(',')
 
   const rows = result.transformed.asset_table_rows.map((row) =>
@@ -201,6 +261,9 @@ export async function exportCSV(result: AnalysisApiSuccess): Promise<Blob> {
       row.condition,
       row.center_coordinates.x,
       row.center_coordinates.y,
+      row.shadow_length_pixels ?? 0,
+      row.shadow_length_meters ?? 0,
+      row.estimated_height_meters ?? 0,
     ]
       .map((value) => `"${String(value).replace(/"/g, '""')}"`)
       .join(','),

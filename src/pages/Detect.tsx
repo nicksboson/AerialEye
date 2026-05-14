@@ -8,7 +8,7 @@ import {
 } from 'lucide-react'
 import LoadingOverlay from '../components/LoadingOverlay'
 import { saveLatestAnalysis } from '../lib/analysis-storage'
-import { analyzeSpatialImage, exportGeoJSON, exportCSV, type AnalysisMode } from '../utils/api'
+import { analyzeSpatialImage, analyzeSpatialVideo, exportGeoJSON, exportCSV, type AnalysisMode } from '../utils/api'
 import type { AnalysisApiSuccess, DetectedAsset, NormalizedPoint } from '../types/analysis'
 
 type ViewMode = 'upload' | 'results'
@@ -44,6 +44,28 @@ const LOCAL_SAMPLE_EXTENSIONS = ['', '.jpg', '.jpeg', '.png', '.webp', '.tif', '
 const ANALYSIS_MODE_LABELS: Record<AnalysisMode, string> = {
   block_analysis: 'Block Analysis',
   naming_analysis: 'Naming Analysis',
+  asset_map_analysis: 'Asset Map',
+  video_analysis: 'Video Analysis',
+}
+
+const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.mpeg', '.mpg', '.m4v'] as const
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp'] as const
+
+function hasAnyExtension(filename: string, extensions: readonly string[]): boolean {
+  const lower = filename.toLowerCase()
+  return extensions.some((ext) => lower.endsWith(ext))
+}
+
+function isVideoFile(file: File | null): boolean {
+  if (!file) return false
+  if (file.type.startsWith('video/')) return true
+  return hasAnyExtension(file.name, VIDEO_EXTENSIONS)
+}
+
+function isImageFile(file: File | null): boolean {
+  if (!file) return false
+  if (file.type.startsWith('image/')) return true
+  return hasAnyExtension(file.name, IMAGE_EXTENSIONS)
 }
 
 function clampPercent(value: number): number {
@@ -131,6 +153,16 @@ function pointsToString(points: DisplayPoint[]): string {
   return points.map((point) => `${point.x},${point.y}`).join(' ')
 }
 
+function formatAreaSqM(area: number): string {
+  if (!Number.isFinite(area) || area <= 0) return '0'
+  return area.toLocaleString(undefined, { maximumFractionDigits: 1 })
+}
+
+function formatHeightM(height: number): string {
+  if (!Number.isFinite(height) || height <= 0) return '0.0'
+  return height.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+}
+
 async function resolveSampleImageUrl(baseName: string): Promise<string | null> {
   for (const extension of LOCAL_SAMPLE_EXTENSIONS) {
     const candidate = `/${baseName}${extension}`
@@ -166,7 +198,8 @@ export default function Detect() {
   const [imageNaturalSize, setImageNaturalSize] = useState<{ width: number; height: number } | null>(null)
   const [sampleImages, setSampleImages] = useState<SampleImage[]>([])
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('block_analysis')
-  const [namingVisualizationUrl, setNamingVisualizationUrl] = useState<string | null>(null)
+  const [modeVisualizationUrl, setModeVisualizationUrl] = useState<string | null>(null)
+  const [modeVideoUrl, setModeVideoUrl] = useState<string | null>(null)
 
   const layerMenuRef = useRef<HTMLDivElement>(null)
   const fullscreenRef = useRef<HTMLDivElement>(null)
@@ -236,6 +269,7 @@ export default function Detect() {
   }, [comparisonData])
 
   const allAssets = analysisResult?.data.detected_assets || []
+  const isVideoAnalysisMode = analysisMode === 'video_analysis'
 
   const visibleAssets = useMemo(
     () =>
@@ -304,6 +338,42 @@ export default function Detect() {
     [layerByCategory, mapPointToViewport, visibleAssets],
   )
 
+  const areaCountSummary = useMemo(() => {
+    const rows = comparisonData
+      .map((layer) => ({
+        layerId: layer.layer_id,
+        category: layer.category,
+        color: layer.color,
+        count: Number.isFinite(layer.count) ? layer.count : 0,
+        areaSqM: Number.isFinite(layer.area_sq_m) ? layer.area_sq_m : 0,
+      }))
+      .sort((a, b) => b.count - a.count)
+
+    const totalCount = rows.reduce((sum, row) => sum + row.count, 0)
+    const totalAreaSqM = rows.reduce((sum, row) => sum + row.areaSqM, 0)
+
+    return { rows, totalCount, totalAreaSqM }
+  }, [comparisonData])
+
+  const buildingHeightSummary = useMemo(() => {
+    const heights = allAssets
+      .filter((asset) => String(asset.category || '').toLowerCase().includes('building'))
+      .map((asset) => Number(asset.estimated_height_meters))
+      .filter((value) => Number.isFinite(value) && value > 0)
+
+    if (heights.length === 0) return null
+
+    const total = heights.reduce((sum, value) => sum + value, 0)
+    const avg = total / heights.length
+    const min = Math.min(...heights)
+    const max = Math.max(...heights)
+    return { count: heights.length, avg, min, max }
+  }, [allAssets])
+
+  const mappedCount = isVideoAnalysisMode
+    ? (analysisResult?.transformed.analytics_cards.total_assets_detected || 0)
+    : displayAssets.length
+
   const setPreviewFromFile = useCallback((file: File) => {
     if (objectUrlRef.current) {
       URL.revokeObjectURL(objectUrlRef.current)
@@ -327,20 +397,25 @@ export default function Detect() {
       const f = files[0]
       if (!f) return
       setSelectedFile(f)
+      setAnalysisMode(isVideoFile(f) ? 'video_analysis' : 'block_analysis')
       setPreviewFromFile(f)
       setAnalysisResult(null)
       setEnabledLayers([])
       setHoveredAssetId(null)
       setImageNaturalSize(null)
-      setNamingVisualizationUrl(null)
+      setModeVisualizationUrl(null)
+      setModeVideoUrl(null)
     },
     [setPreviewFromFile],
   )
 
   const dz = useDropzone({
     onDrop,
-    accept: { 'image/*': ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp'] },
-    maxSize: 50 * 1024 * 1024,
+    accept: {
+      'image/*': ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp'],
+      'video/*': ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.mpeg', '.mpg', '.m4v'],
+    },
+    maxSize: 500 * 1024 * 1024,
     multiple: false,
   })
 
@@ -354,12 +429,14 @@ export default function Detect() {
           type: blob.type || 'image/jpeg',
         })
         setSelectedFile(file)
+        setAnalysisMode('block_analysis')
         setPreviewFromFile(file)
         setAnalysisResult(null)
         setEnabledLayers([])
         setHoveredAssetId(null)
         setImageNaturalSize(null)
-        setNamingVisualizationUrl(null)
+        setModeVisualizationUrl(null)
+        setModeVideoUrl(null)
       } catch (err) {
         console.error('Failed to load local sample image as file:', err)
       }
@@ -369,13 +446,15 @@ export default function Detect() {
 
   const clearSelection = () => {
     setSelectedFile(null)
+    setAnalysisMode('block_analysis')
     setPreviewUrl(null)
     setAnalysisResult(null)
     setViewMode('upload')
     setEnabledLayers([])
     setHoveredAssetId(null)
     setImageNaturalSize(null)
-    setNamingVisualizationUrl(null)
+    setModeVisualizationUrl(null)
+    setModeVideoUrl(null)
   }
 
   const toggleLayer = (layerId: string) => {
@@ -412,11 +491,26 @@ export default function Detect() {
 
   const runDetection = async (mode: AnalysisMode) => {
     if (!selectedFile) return
+
+    const selectedIsVideo = isVideoFile(selectedFile)
+    const selectedIsImage = isImageFile(selectedFile)
+    if (mode === 'video_analysis' && !selectedIsVideo) {
+      alert('Please upload a video file for Video Analysis.')
+      return
+    }
+    if (mode !== 'video_analysis' && !selectedIsImage) {
+      alert('Please upload an image file for Block, Naming, or Asset Map analysis.')
+      return
+    }
+
     setAnalysisMode(mode)
     setIsProcessing(true)
 
     try {
-      const result = await analyzeSpatialImage(selectedFile, mode)
+      const result =
+        mode === 'video_analysis'
+          ? await analyzeSpatialVideo(selectedFile)
+          : await analyzeSpatialImage(selectedFile, mode)
       if (!result.success) {
         alert(`Analysis Failed: ${result.error.message}\n${result.error.details || ''}`)
         return
@@ -444,12 +538,20 @@ export default function Detect() {
 
       setAnalysisResult(result)
       setEnabledLayers([...new Set(layers)])
+      setHoveredAssetId(null)
+      setImageNaturalSize(null)
       setViewMode('results')
       setZoom(1)
       setShowOriginal(false)
-      setNamingVisualizationUrl(
-        mode === 'naming_analysis' ? result.naming_visualization_data_url || null : null,
+      setModeVisualizationUrl(
+        mode === 'naming_analysis' || mode === 'asset_map_analysis'
+          ? result.height_visualization_data_url ||
+            (mode === 'naming_analysis'
+              ? result.naming_visualization_data_url || null
+              : result.asset_map_visualization_data_url || null)
+          : null,
       )
+      setModeVideoUrl(mode === 'video_analysis' ? result.video_result_url || null : null)
       saveLatestAnalysis(result)
     } catch (err) {
       alert('An unexpected error occurred during analysis.')
@@ -505,9 +607,9 @@ export default function Detect() {
                   </motion.div>
                   <div>
                     <h3 className="text-xl sm:text-2xl font-['Space_Grotesk'] font-semibold text-stone-900 mb-1">
-                      {dz.isDragActive ? 'Drop your image here' : 'Drop image here or click to browse'}
+                      {dz.isDragActive ? 'Drop your file here' : 'Drop image/video here or click to browse'}
                     </h3>
-                    <p className="text-stone-500 text-sm">JPG, PNG, TIFF, WEBP - up to 50MB</p>
+                    <p className="text-stone-500 text-sm">JPG, PNG, TIFF, WEBP, MP4, MOV, AVI, MKV, WEBM - up to 500MB</p>
                   </div>
                 </div>
               </div>
@@ -549,10 +651,21 @@ export default function Detect() {
               className="bg-white rounded-2xl overflow-hidden border border-stone-200 shadow-soft"
             >
               <div className="relative bg-stone-100">
-                <img
-                  src={previewUrl || ''} alt="Selected" crossOrigin="anonymous"
-                  className="w-full max-h-[420px] sm:max-h-[520px] object-contain"
-                />
+                {isVideoFile(selectedFile) ? (
+                  <video
+                    src={previewUrl || ''}
+                    className="w-full max-h-[420px] sm:max-h-[520px] object-contain"
+                    controls
+                    playsInline
+                  />
+                ) : (
+                  <img
+                    src={previewUrl || ''}
+                    alt="Selected"
+                    crossOrigin="anonymous"
+                    className="w-full max-h-[420px] sm:max-h-[520px] object-contain"
+                  />
+                )}
                 <button
                   onClick={clearSelection}
                   className="absolute top-3 right-3 w-9 h-9 rounded-full bg-white/95 backdrop-blur-sm flex items-center justify-center text-stone-600 hover:text-stone-900 shadow-medium hover:scale-105 active:scale-95 transition-transform"
@@ -572,7 +685,7 @@ export default function Detect() {
                     </p>
                   </div>
                 </div>
-                <div className="w-full sm:w-auto grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="w-full sm:w-auto grid grid-cols-1 sm:grid-cols-4 gap-2">
                   <button
                     onClick={() => void runDetection('block_analysis')}
                     className="w-full px-4 py-3 bg-teal-600 text-white rounded-xl font-semibold text-sm hover:bg-teal-700 active:scale-[0.98] transition-all duration-200 inline-flex items-center justify-center gap-2 shadow-soft"
@@ -584,6 +697,18 @@ export default function Detect() {
                     className="w-full px-4 py-3 bg-stone-100 text-stone-700 rounded-xl font-semibold text-sm hover:bg-stone-200 active:scale-[0.98] transition-all duration-200 inline-flex items-center justify-center gap-2 border border-stone-200"
                   >
                     <ImageIcon className="w-4 h-4" /> Naming Analysis
+                  </button>
+                  <button
+                    onClick={() => void runDetection('asset_map_analysis')}
+                    className="w-full px-4 py-3 bg-stone-100 text-stone-700 rounded-xl font-semibold text-sm hover:bg-stone-200 active:scale-[0.98] transition-all duration-200 inline-flex items-center justify-center gap-2 border border-stone-200"
+                  >
+                    <ImageIcon className="w-4 h-4" /> Asset Map
+                  </button>
+                  <button
+                    onClick={() => void runDetection('video_analysis')}
+                    className="w-full px-4 py-3 bg-stone-100 text-stone-700 rounded-xl font-semibold text-sm hover:bg-stone-200 active:scale-[0.98] transition-all duration-200 inline-flex items-center justify-center gap-2 border border-stone-200"
+                  >
+                    <ImageIcon className="w-4 h-4" /> Video Analysis
                   </button>
                 </div>
               </div>
@@ -615,7 +740,7 @@ export default function Detect() {
             <span className="text-sm font-semibold text-stone-800">
               {analysisResult?.transformed.analytics_cards.total_assets_detected || 0}
             </span>
-            <span className="text-sm text-stone-500">blocks mapped</span>
+            <span className="text-sm text-stone-500">{isVideoAnalysisMode ? 'detections mapped' : 'blocks mapped'}</span>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -640,6 +765,28 @@ export default function Detect() {
             } ${!selectedFile || isProcessing ? 'opacity-60 cursor-not-allowed' : ''}`}
           >
             Naming Analysis
+          </button>
+          <button
+            onClick={() => void runDetection('asset_map_analysis')}
+            disabled={!selectedFile || isProcessing}
+            className={`hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
+              analysisMode === 'asset_map_analysis'
+                ? 'bg-teal-600 text-white border-teal-600'
+                : 'bg-stone-100 hover:bg-stone-200 text-stone-700 border-stone-200'
+            } ${!selectedFile || isProcessing ? 'opacity-60 cursor-not-allowed' : ''}`}
+          >
+            Asset Map
+          </button>
+          <button
+            onClick={() => void runDetection('video_analysis')}
+            disabled={!selectedFile || isProcessing}
+            className={`hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
+              analysisMode === 'video_analysis'
+                ? 'bg-teal-600 text-white border-teal-600'
+                : 'bg-stone-100 hover:bg-stone-200 text-stone-700 border-stone-200'
+            } ${!selectedFile || isProcessing ? 'opacity-60 cursor-not-allowed' : ''}`}
+          >
+            Video Analysis
           </button>
           <button
             onClick={handleExportGeoJSON}
@@ -786,20 +933,36 @@ export default function Detect() {
             className="relative shrink-0"
             style={{ transform: `scale(${zoom})`, transformOrigin: 'center', transition: 'transform 0.25s ease' }}
           >
-            <img
-              src={
-                analysisMode === 'naming_analysis' && !showOriginal && namingVisualizationUrl
-                  ? namingVisualizationUrl
-                  : (previewUrl || '')
-              }
-              alt="Detected imagery"
-              crossOrigin="anonymous"
-              className="block w-[min(760px,88vw)] aspect-[4/3] object-cover rounded-xl shadow-medium select-none"
-              draggable={false}
-              onLoad={handleResultImageLoad}
-            />
+            {isVideoAnalysisMode ? (
+              <video
+                src={!showOriginal && modeVideoUrl ? modeVideoUrl : (previewUrl || '')}
+                className="block w-[min(760px,88vw)] aspect-[4/3] object-cover rounded-xl shadow-medium select-none bg-black"
+                controls
+                playsInline
+              />
+            ) : (
+              <img
+                src={
+                  (analysisMode === 'naming_analysis' || analysisMode === 'asset_map_analysis') &&
+                  !showOriginal &&
+                  modeVisualizationUrl
+                    ? modeVisualizationUrl
+                    : (previewUrl || '')
+                }
+                alt="Detected imagery"
+                crossOrigin="anonymous"
+                className="block w-[min(760px,88vw)] aspect-[4/3] object-cover rounded-xl shadow-medium select-none"
+                draggable={false}
+                onLoad={handleResultImageLoad}
+              />
+            )}
 
-            {!showOriginal && !(analysisMode === 'naming_analysis' && namingVisualizationUrl) && (
+            {!isVideoAnalysisMode &&
+              !showOriginal &&
+              !(
+                (analysisMode === 'naming_analysis' || analysisMode === 'asset_map_analysis') &&
+                modeVisualizationUrl
+              ) && (
               <svg className="absolute inset-0 w-full h-full rounded-xl overflow-hidden" viewBox="0 0 100 100" preserveAspectRatio="none">
                 {displayAssets.map(({ asset, layer, shape, center, bboxCorners, polygon, line }) => {
                   const color = layer.color || '#888'
@@ -993,6 +1156,12 @@ export default function Detect() {
                       <span className="text-stone-500">Est. Area</span>
                       <span className="font-mono text-stone-800">{asset.estimated_area_sq_m} m2</span>
                     </div>
+                    {Number.isFinite(asset.estimated_height_meters) && (asset.estimated_height_meters || 0) > 0 && (
+                      <div className="flex justify-between text-xs">
+                        <span className="text-stone-500">Height</span>
+                        <span className="font-mono text-stone-800">{asset.estimated_height_meters?.toFixed(1)} m</span>
+                      </div>
+                    )}
                   </div>
                   {asset.visual_description && (
                     <p className="mt-2 text-[10px] text-stone-500 leading-snug border-t border-stone-100 pt-2 italic">
@@ -1012,19 +1181,61 @@ export default function Detect() {
             {analysisResult?.transformed.gis_mapping.map_center.lng.toFixed(4)}°E
           </span>
           <span className="w-px h-4 bg-stone-200" />
-          <span className="text-stone-500">{displayAssets.length} blocks mapped</span>
+          <span className="text-stone-500">
+            {mappedCount} {isVideoAnalysisMode ? 'detections mapped' : 'blocks mapped'}
+          </span>
+          <span className="w-px h-4 bg-stone-200" />
+          <span className="text-stone-500">
+            Avg building height {buildingHeightSummary ? `${formatHeightM(buildingHeightSummary.avg)} m` : 'N/A'}
+          </span>
         </div>
 
-        <div className="absolute bottom-3 right-3 bg-white/96 backdrop-blur-md rounded-xl p-2.5 shadow-medium border border-stone-200/80 hidden sm:flex flex-col gap-1.5 max-h-52 overflow-y-auto">
-          {comparisonData
-            .filter((layer) => enabledLayers.includes(layer.layer_id))
-            .map((layer) => (
-              <div key={layer.layer_id} className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-sm shrink-0 border border-black/10" style={{ backgroundColor: layer.color }} />
-                <span className="text-[11px] text-stone-700 font-medium truncate max-w-[110px]">{layer.category}</span>
-                <span className="text-[10px] text-stone-400 ml-auto pl-2 font-mono tabular-nums">{layer.count}</span>
+        <div className="absolute bottom-3 right-3 bg-white/96 backdrop-blur-md rounded-xl p-2.5 shadow-medium border border-stone-200/80 hidden sm:flex flex-col gap-1.5 max-h-64 overflow-y-auto min-w-[290px]">
+          <div className="border-b border-stone-200/80 pb-1.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">Area/Count Summary</p>
+            <div className="flex items-center justify-between mt-1">
+              <span className="text-[10px] text-stone-500">Total objects</span>
+              <span className="text-[10px] text-stone-700 font-mono tabular-nums">{areaCountSummary.totalCount}</span>
+            </div>
+            <div className="flex items-center justify-between mt-0.5">
+              <span className="text-[10px] text-stone-500">Total area</span>
+              <span className="text-[10px] text-stone-700 font-mono tabular-nums">
+                {formatAreaSqM(areaCountSummary.totalAreaSqM)} m2
+              </span>
+            </div>
+            <div className="flex items-center justify-between mt-0.5">
+              <span className="text-[10px] text-stone-500">Buildings with height</span>
+              <span className="text-[10px] text-stone-700 font-mono tabular-nums">
+                {buildingHeightSummary?.count ?? 0}
+              </span>
+            </div>
+            <div className="flex items-center justify-between mt-0.5">
+              <span className="text-[10px] text-stone-500">Height (avg|min|max)</span>
+              <span className="text-[10px] text-stone-700 font-mono tabular-nums">
+                {buildingHeightSummary
+                  ? `${formatHeightM(buildingHeightSummary.avg)} | ${formatHeightM(buildingHeightSummary.min)} | ${formatHeightM(buildingHeightSummary.max)} m`
+                  : 'N/A'}
+              </span>
+            </div>
+          </div>
+
+          {areaCountSummary.rows.length > 0 ? (
+            areaCountSummary.rows.map((row) => (
+              <div key={row.layerId} className="flex items-start gap-2">
+                <span
+                  className="w-2.5 h-2.5 rounded-sm shrink-0 border border-black/10 mt-0.5"
+                  style={{ backgroundColor: row.color }}
+                />
+                <span className="text-[11px] text-stone-700 font-medium truncate max-w-[130px]">{row.category}</span>
+                <div className="ml-auto pl-2 text-right leading-tight">
+                  <div className="text-[10px] text-stone-500 font-mono tabular-nums">{row.count} objects</div>
+                  <div className="text-[10px] text-stone-500 font-mono tabular-nums">{formatAreaSqM(row.areaSqM)} m2</div>
+                </div>
               </div>
-            ))}
+            ))
+          ) : (
+            <div className="text-[11px] text-stone-500">No detected assets to summarize.</div>
+          )}
         </div>
       </div>
     </motion.div>

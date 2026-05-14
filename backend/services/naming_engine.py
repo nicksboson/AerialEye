@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from backend.services.area_utils import get_meters_per_pixel, pixel_area_to_sq_m, pixel_length_to_m
 from backend.services.vision_engine import (
     AnalysisResult,
     VisionEngineError,
@@ -98,7 +99,12 @@ def _build_asset(
     image_width: int,
     image_height: int,
     index: int,
+    meters_per_pixel: float,
 ) -> Dict[str, Any]:
+    box_width_px = max(float(xyxy[2] - xyxy[0]), 0.0)
+    box_height_px = max(float(xyxy[3] - xyxy[1]), 0.0)
+    box_area_px = box_width_px * box_height_px
+
     x_min = _clamp_percent((xyxy[0] / image_width) * 100.0)
     y_min = _clamp_percent((xyxy[1] / image_height) * 100.0)
     x_max = _clamp_percent((xyxy[2] / image_width) * 100.0)
@@ -112,14 +118,11 @@ def _build_asset(
     center_x = (x_min + x_max) / 2.0
     center_y = (y_min + y_max) / 2.0
 
-    box_width_pct = max(x_max - x_min, 0.0)
-    box_height_pct = max(y_max - y_min, 0.0)
-    coverage_percent = (box_width_pct * box_height_pct) / 100.0
-
-    # Area and dimensions are approximate because pixel detections do not include scale metadata.
-    estimated_area_sq_m = round(coverage_percent * 10.0, 2)
-    est_length = round((box_width_pct / 100.0) * 100.0, 2)
-    est_width = round((box_height_pct / 100.0) * 100.0, 2)
+    image_area_px = max(float(image_width * image_height), 1.0)
+    coverage_percent = (box_area_px / image_area_px) * 100.0
+    estimated_area_sq_m = round(pixel_area_to_sq_m(box_area_px, meters_per_pixel), 2)
+    est_length = round(pixel_length_to_m(box_width_px, meters_per_pixel), 2)
+    est_width = round(pixel_length_to_m(box_height_px, meters_per_pixel), 2)
 
     category = _map_class_name_to_category(class_name)
     readable_subcategory = class_name.strip() or "unknown"
@@ -178,6 +181,7 @@ def _build_schema_payload(
     model_name: str,
     image_width: int,
     image_height: int,
+    meters_per_pixel: float,
 ) -> Dict[str, Any]:
     payload = default_response_schema()
     payload["detected_assets"] = assets
@@ -207,9 +211,10 @@ def _build_schema_payload(
     payload["image_analysis"] = {
         "scene_type": "YOLO Spatial Asset Detection",
         "image_quality": "Processed",
-        "estimated_total_area_sq_m": round(sum(
-            _to_float(asset.get("estimated_area_sq_m"), 0.0) for asset in assets
-        ), 2),
+        "estimated_total_area_sq_m": round(
+            pixel_area_to_sq_m(float(image_width * image_height), meters_per_pixel),
+            2,
+        ),
         "overall_detection_confidence_percent": round(_clamp_percent(mean_confidence), 2),
         "dominant_land_use": "Mixed Urban",
     }
@@ -260,6 +265,7 @@ def _build_visualization_data_url(result_obj: Any) -> str:
 def analyze_naming_image(image_path: str, model_path: Optional[str] = None) -> AnalysisResult:
     resolved_model_path = _resolve_model_path(model_path)
     model = _load_model(resolved_model_path)
+    meters_per_pixel = get_meters_per_pixel()
 
     try:
         predictions = model.predict(
@@ -310,13 +316,30 @@ def analyze_naming_image(image_path: str, model_path: Optional[str] = None) -> A
                 class_name = str(names[cls_id])
             else:
                 class_name = f"class_{cls_id}"
-            assets.append(_build_asset(class_name, confidence, xyxy, image_width, image_height, idx))
+            assets.append(
+                _build_asset(
+                    class_name,
+                    confidence,
+                    xyxy,
+                    image_width,
+                    image_height,
+                    idx,
+                    meters_per_pixel,
+                )
+            )
 
-    parsed_payload = _build_schema_payload(assets, resolved_model_path.name, image_width, image_height)
+    parsed_payload = _build_schema_payload(
+        assets,
+        resolved_model_path.name,
+        image_width,
+        image_height,
+        meters_per_pixel,
+    )
 
     warnings: List[str] = []
     if not assets:
         warnings.append("YOLO returned no detections above threshold for this image.")
+    warnings.append(f"Area estimates use METERS_PER_PIXEL={meters_per_pixel}.")
 
     if assets:
         validated, validation_warnings = validate_response_schema(parsed_payload)

@@ -41,6 +41,9 @@ export interface DetectedAsset {
   polygon_coordinates: NormalizedPoint[]
   visual_description: string
   estimation_basis: string
+  shadow_length_pixels?: number
+  shadow_length_meters?: number
+  estimated_height_meters?: number
 }
 
 export interface ImageAnalysis {
@@ -167,14 +170,37 @@ export interface TransformedPayload {
     center_coordinates: NormalizedPoint
     visual_description: string
     estimation_basis: string
+    shadow_length_pixels?: number
+    shadow_length_meters?: number
+    estimated_height_meters?: number
   }>
 }
 
 export interface AnalysisApiSuccess {
   success: true
   request_id: string
-  analysis_mode?: 'block_analysis' | 'naming_analysis' | string
+  analysis_mode?: 'block_analysis' | 'naming_analysis' | 'asset_map_analysis' | 'video_analysis' | string
   naming_visualization_data_url?: string
+  asset_map_visualization_data_url?: string
+  height_visualization_data_url?: string
+  height_estimation_output_path?: string
+  height_estimation_json_path?: string
+  height_estimation_config?: {
+    meters_per_pixel: number
+    solar_elevation_angle: number
+  }
+  video_result_url?: string
+  video_metadata?: {
+    processed_frames: number
+    detected_frames?: number
+    source_total_frames: number
+    fps: number
+    width: number
+    height: number
+    output_filename: string
+    frame_stride?: number
+    max_detection_dim?: number
+  }
   data: StructuredAnalysis
   transformed: TransformedPayload
   warnings: string[]

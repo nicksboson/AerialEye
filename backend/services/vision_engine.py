@@ -11,6 +11,7 @@ from PIL import Image
 
 import httpx
 from dotenv import load_dotenv
+from backend.services.area_utils import get_meters_per_pixel, pixel_area_to_sq_m, pixel_length_to_m
 
 load_dotenv()
 
@@ -270,6 +271,9 @@ def _default_asset(index: int = 1) -> Dict[str, Any]:
         "polygon_coordinates": [{"x": 0.0, "y": 0.0}],
         "visual_description": "No reliable visual details extracted.",
         "estimation_basis": "Fallback due to incomplete model response.",
+        "shadow_length_pixels": 0.0,
+        "shadow_length_meters": 0.0,
+        "estimated_height_meters": 0.0,
     }
 
 
@@ -432,14 +436,18 @@ def encode_image(image_path: str) -> Tuple[str, str]:
     encoded = base64.b64encode(data).decode("utf-8")
     return encoded, mime_type
 
-def generate_heuristic_blocks(image_path: str) -> List[Dict[str, Any]]:
+def generate_heuristic_blocks(image_path: str, meters_per_pixel: float | None = None) -> List[Dict[str, Any]]:
     try:
         img = Image.open(image_path).convert("RGB")
         width, height = img.size
+        mpp = meters_per_pixel if meters_per_pixel is not None else get_meters_per_pixel()
+        image_area_px = max(float(width * height), 1.0)
         
         # Grid density
         grid_size_x = 35
         grid_size_y = max(1, int(grid_size_x * (height / width)))
+        cell_width_px = float(width) / float(grid_size_x)
+        cell_height_px = float(height) / float(grid_size_y)
         
         img_small = img.resize((grid_size_x, grid_size_y), Image.Resampling.BILINEAR)
         pixels = img_small.load()
@@ -513,6 +521,9 @@ def generate_heuristic_blocks(image_path: str) -> List[Dict[str, Any]]:
             x_max = min(100.0, ((comp["max_x"] + 1) / grid_size_x) * 100.0)
             y_min = max(0.0, (comp["min_y"] / grid_size_y) * 100.0)
             y_max = min(100.0, ((comp["max_y"] + 1) / grid_size_y) * 100.0)
+            area_px = float(comp["count"]) * cell_width_px * cell_height_px
+            box_width_px = float(comp["max_x"] - comp["min_x"] + 1) * cell_width_px
+            box_height_px = float(comp["max_y"] - comp["min_y"] + 1) * cell_height_px
             
             assets.append({
                  "unique_id": f"auto_block_{i}",
@@ -520,8 +531,12 @@ def generate_heuristic_blocks(image_path: str) -> List[Dict[str, Any]]:
                  "subcategory": f"Detected {comp['category'].split(' ')[0]}",
                  "confidence_percent": min(85.0 + comp["count"] * 2, 99.0),
                  "estimated_count": comp["count"],
-                 "estimated_area_sq_m": comp["count"] * 15.0,
-                 "estimated_coverage_percent": (comp["count"] / (grid_size_x * grid_size_y)) * 100.0,
+                 "estimated_area_sq_m": round(pixel_area_to_sq_m(area_px, mpp), 2),
+                 "estimated_dimensions_m": {
+                      "length": round(pixel_length_to_m(box_width_px, mpp), 2),
+                      "width": round(pixel_length_to_m(box_height_px, mpp), 2),
+                 },
+                 "estimated_coverage_percent": round((area_px / image_area_px) * 100.0, 4),
                  "condition_status": "Monitored",
                  "maintenance_priority": "Low",
                  "center_coordinates": {
@@ -688,6 +703,9 @@ def validate_response_schema(data: Dict[str, Any]) -> Tuple[Dict[str, Any], List
                         raw_asset.get("estimation_basis"),
                         "Estimated from available visual context.",
                     ),
+                    "shadow_length_pixels": max(_safe_float(raw_asset.get("shadow_length_pixels"), 0.0), 0.0),
+                    "shadow_length_meters": max(_safe_float(raw_asset.get("shadow_length_meters"), 0.0), 0.0),
+                    "estimated_height_meters": max(_safe_float(raw_asset.get("estimated_height_meters"), 0.0), 0.0),
                 }
             )
     else:
@@ -889,6 +907,9 @@ def _build_transformed_payload(validated: Dict[str, Any]) -> Dict[str, Any]:
                 "center_coordinates": asset["center_coordinates"],
                 "visual_description": asset["visual_description"],
                 "estimation_basis": asset["estimation_basis"],
+                "shadow_length_pixels": asset.get("shadow_length_pixels", 0.0),
+                "shadow_length_meters": asset.get("shadow_length_meters", 0.0),
+                "estimated_height_meters": asset.get("estimated_height_meters", 0.0),
             }
         )
 
@@ -1000,6 +1021,7 @@ def analyze_spatial_image(image_path: str, prompt: str = ANALYSIS_PROMPT) -> Ana
 
     encoded_image, mime_type = encode_image(image_path)
     logger.info("Encoded image for AI analysis. mime=%s bytes(base64)=%s", mime_type, len(encoded_image))
+    meters_per_pixel = get_meters_per_pixel()
 
     warnings: List[str] = []
     
@@ -1047,22 +1069,38 @@ def analyze_spatial_image(image_path: str, prompt: str = ANALYSIS_PROMPT) -> Ana
             raise VisionEngineError(f"AI vision API failed: {err}") from err
 
     logger.info("Starting AI Textual Assessment...")
-    raw_text = run_ai_pass(prompt)
-    
-    if not raw_text:
-        warnings.append("AI returned empty content stream.")
-
-    parsed, parse_warnings = parse_ai_response(raw_text)
-    warnings.extend(parse_warnings)
+    raw_text = ""
+    parsed = default_response_schema()
+    try:
+        raw_text = run_ai_pass(prompt)
+        if not raw_text:
+            warnings.append("AI returned empty content stream.")
+        parsed, parse_warnings = parse_ai_response(raw_text)
+        warnings.extend(parse_warnings)
+    except VisionEngineError as err:
+        # Keep block analysis available even when external vision API is unavailable/rate-limited.
+        warnings.append(f"Vision API unavailable, using local heuristic detection fallback: {err}")
+        logger.warning("Vision API failed, switching to heuristic fallback: %s", err)
     
     # OVERRIDE the hallucinated coordinates with 100% accurate Pixel Blocks
     logger.info("Generating 100% accurate pixel-level semantic blocks...")
-    accurate_blocks = generate_heuristic_blocks(image_path)
+    accurate_blocks = generate_heuristic_blocks(image_path, meters_per_pixel)
     if accurate_blocks:
         parsed["detected_assets"] = accurate_blocks
 
     validated, validation_warnings = validate_response_schema(parsed)
     warnings.extend(validation_warnings)
+    try:
+        with Image.open(image_path) as source_image:
+            img_width, img_height = source_image.size
+        validated["image_analysis"]["estimated_total_area_sq_m"] = round(
+            pixel_area_to_sq_m(float(img_width * img_height), meters_per_pixel),
+            2,
+        )
+    except Exception as err:
+        logger.warning("Could not compute image area in square meters: %s", err)
+
+    warnings.append(f"Area estimates use METERS_PER_PIXEL={meters_per_pixel}.")
     transformed = _build_transformed_payload(validated)
 
     return AnalysisResult(
